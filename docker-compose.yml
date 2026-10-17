@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}      # use "production" only behind HTTPS (cookies become Secure)
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Kolkata}
+    volumes: ["servicepro-data:/data"]
+volumes:
+  servicepro-data:
