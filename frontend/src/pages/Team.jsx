@@ -28,5 +28,26 @@ export default function Team() {
       <label>Temporary password (min 10 characters)<input type="password" name="password" value={f.password} onChange={on} minLength={10} required autoComplete="new-password" /></label>
       <label>Role<select name="role" value={f.role} onChange={on}><option value="staff">Staff</option><option value="admin">Admin</option></select></label>
       <button className="btn">Create user</button></form></div>
+    <div className="card narrow top" style={{ borderColor: 'var(--bad)' }}>
+      <h2 style={{ color: 'var(--bad)', margin: '0 0 0.5rem 0' }}>Database Management</h2>
+      <p className="muted" style={{ fontSize: '0.85rem' }}>
+        Delete all customer leads, follow-up history, and import records to start fresh. Admin accounts will not be deleted.
+      </p>
+      <button
+        type="button"
+        className="btn danger"
+        onClick={async () => {
+          if (!window.confirm('⚠️ WARNING: Are you sure you want to delete ALL customer and follow-up data? This action cannot be undone.')) return
+          try {
+            const r = await api('/admin/clear-data', { method: 'POST' })
+            setMsg({ t: 'ok', m: r.message })
+          } catch (e) {
+            setMsg({ t: 'error', m: e.message })
+          }
+        }}
+      >
+        🗑️ Clear All Customer Data
+      </button>
+    </div>
   </>)
 }

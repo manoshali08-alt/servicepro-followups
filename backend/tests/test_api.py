@@ -104,6 +104,72 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(staff.get("/api/users").status_code, 403)
         self.assertEqual(staff.delete("/api/customers/1").status_code, 403)
 
+    def test_call_reports_and_admin_view_all_calls(self):
+        # Create a customer and log calls
+        cid = self.c.post("/api/customers", json={"phone": "9998887770", "business_name": "Acme Corp", "customer_name": "John"}).json()["id"]
+        r = self.c.post(f"/api/customers/{cid}/followups", json={
+            "contact_date": "2026-10-22", "method": "Phone Call", "outcome": "Answered",
+            "feedback": "Interested in premium plan", "issue_type": "", "issue": "",
+            "duration_seconds": 180, "next_action": "Send proposal", "next_followup_date": "2026-10-25"
+        })
+        self.assertEqual(r.status_code, 201)
+
+        # Admin calls agent-dashboard with user_id=all
+        dash = self.c.get("/api/agent-dashboard?user_id=all&date=2026-10-22").json()
+        self.assertEqual(dash["my_stats"]["calls_count"], 1)
+        self.assertEqual(dash["my_stats"]["total_duration_seconds"], 180)
+        self.assertEqual(len(dash["my_calls"]), 1)
+        self.assertEqual(dash["my_calls"][0]["staff"], "Admin")
+
+        # Call reports endpoint
+        rep = self.c.get("/api/call-reports?start_date=2026-10-20&end_date=2026-10-25").json()
+        self.assertEqual(rep["total"], 1)
+        self.assertEqual(rep["stats"]["total_calls"], 1)
+        self.assertEqual(rep["stats"]["answered_calls"], 1)
+        self.assertEqual(rep["items"][0]["business_name"], "Acme Corp")
+        self.assertEqual(rep["items"][0]["staff"], "Admin")
+
+        # Export reports in xlsx and csv
+        r_xlsx = self.c.get("/api/call-reports/export?format=xlsx")
+        self.assertEqual(r_xlsx.status_code, 200)
+        self.assertIn("application/vnd.openxmlformats", r_xlsx.headers["content-type"])
+
+        r_csv = self.c.get("/api/call-reports/export?format=csv")
+        self.assertEqual(r_csv.status_code, 200)
+        self.assertIn("text/csv", r_csv.headers["content-type"])
+        self.assertIn("Acme Corp", r_csv.text)
+
+    def test_dynamic_outcomes_and_closed_status(self):
+        # 1. Add a dynamic outcome
+        r = self.c.post("/api/outcomes", json={"name": "Left Voicemail"})
+        self.assertEqual(r.status_code, 201)
+        outcomes = self.c.get("/api/outcomes").json()
+        self.assertIn("Left Voicemail", outcomes)
+
+        meta = self.c.get("/api/meta").json()
+        self.assertIn("Left Voicemail", meta["outcomes"])
+        self.assertIn("Closed", meta["statuses"])
+        self.assertIn("Closed", meta["closed"])
+
+        # 2. Create customer and close them via followup
+        cid = self.c.post("/api/customers", json={"phone": "9991112233", "business_name": "Closed Co"}).json()["id"]
+        r = self.c.post(f"/api/customers/{cid}/followups", json={
+            "contact_date": "2026-10-22", "method": "Call", "outcome": "Left Voicemail",
+            "status": "Closed", "next_followup_date": "2026-10-30"
+        })
+        self.assertEqual(r.status_code, 201)
+
+        # Verify next_followup_date is cleared when Closed
+        cust = self.c.get(f"/api/customers/{cid}").json()["customer"]
+        self.assertEqual(cust["status"], "Closed")
+        self.assertIsNone(cust["next_followup_date"])
+
+        # Verify closed customer is NOT in due or overdue lists
+        due_custs = self.c.get("/api/customers?due=upcoming").json()["items"]
+        self.assertNotIn("Closed Co", [c["business_name"] for c in due_custs])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

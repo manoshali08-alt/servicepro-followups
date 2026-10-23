@@ -8,6 +8,7 @@ import Customer from './pages/Customer.jsx'
 import ImportPage from './pages/Import.jsx'
 import ImportResult from './pages/ImportResult.jsx'
 import Report from './pages/Report.jsx'
+import CallReports from './pages/CallReports.jsx'
 import Team from './pages/Team.jsx'
 
 const Ctx = createContext(null)
@@ -44,8 +45,9 @@ export default function App() {
         <nav>
           <NavLink to="/" end>Dashboard</NavLink>
           <NavLink to="/customers">Customers</NavLink>
-          <NavLink to="/import">Import</NavLink>
+          <NavLink to="/call-reports">Call Reports</NavLink>
           <NavLink to="/report">Feedback report</NavLink>
+          <NavLink to="/import">Import</NavLink>
           {user.role === 'admin' && <NavLink to="/team">Team</NavLink>}
         </nav>
         <span className="muted">{user.name}</span>
@@ -57,6 +59,7 @@ export default function App() {
           <Route path="/customers" element={<Customers />} />
           <Route path="/customers/new" element={<Customer />} />
           <Route path="/customers/:id" element={<Customer />} />
+          <Route path="/call-reports" element={<CallReports />} />
           <Route path="/import" element={<ImportPage />} />
           <Route path="/imports/:id" element={<ImportResult />} />
           <Route path="/report" element={<Report />} />

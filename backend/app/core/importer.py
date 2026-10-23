@@ -17,7 +17,8 @@ SYN = {"phone": ["phone", "mobile", "contactnumber", "contactno", "whatsapp", "c
        "notes": ["notes", "note"]}
 STATUS_ALIASES = {"converted": "Converted to Paid", "paid": "Converted to Paid", "not interested": "Not Interested",
                   "follow up needed": "Follow-up Needed", "follow up scheduled": "Follow-up Scheduled",
-                  "new": "Not Contacted", "pending": "Not Contacted"}
+                  "new": "Not Contacted", "pending": "Not Contacted", "closed": "Closed", "close": "Closed",
+                  "do not contact": "Closed"}
 
 
 class ImportFileError(Exception):
