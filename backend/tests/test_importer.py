@@ -31,5 +31,81 @@ class ClassifyTests(unittest.TestCase):
         self.assertIn("Weird", res[0]["record"]["notes"])
 
 
+    def test_contacted_and_feedback_mapping_and_parsing(self):
+        m = importer.guess_mapping(["Customer Name", "Phone", "Customer Contacted", "Feedback"])
+        self.assertEqual(m["customer_name"], 0)
+        self.assertEqual(m["phone"], 1)
+        self.assertEqual(m["last_contact_date"], 2)
+        self.assertEqual(m["feedback"], 3)
+
+        d, is_c, note = importer.parse_contacted("15/10/2026")
+        self.assertEqual(d, "2026-10-15")
+        self.assertTrue(is_c)
+        self.assertIsNone(note)
+
+        d, is_c, note = importer.parse_contacted("Yes")
+        self.assertIsNone(d)
+        self.assertTrue(is_c)
+
+        d, is_c, note = importer.parse_contacted("No")
+        self.assertIsNone(d)
+        self.assertFalse(is_c)
+
+        rows = [(2, ["9876543210", "15/10/2026", "Loves the app"])]
+        res, _ = importer.classify(rows, {"phone": 0, "last_contact_date": 1, "feedback": 2}, {})
+        rec = res[0]["record"]
+        self.assertEqual(rec["last_contact_date"], "2026-10-15")
+        self.assertEqual(rec["status"], "Contacted")
+        self.assertEqual(rec["feedback"], "Loves the app")
+
+    def test_feedback_import_mapping_and_classify(self):
+        headers = ["Phone Number", "Customer Name", "Customer Feedback", "Issue Type", "Call Duration"]
+        m = importer.guess_feedback_mapping(headers)
+        self.assertEqual(m["phone"], 0)
+        self.assertEqual(m["customer_name"], 1)
+        self.assertEqual(m["feedback"], 2)
+        self.assertEqual(m["issue_type"], 3)
+        self.assertEqual(m["duration_seconds"], 4)
+
+        self.assertEqual(importer.parse_duration("120"), 120)
+        self.assertEqual(importer.parse_duration("02:30"), 150)
+        self.assertEqual(importer.parse_issue_type("Bug in report"), "Problem")
+        self.assertEqual(importer.parse_issue_type("Add dark mode please"), "Feature request")
+        self.assertEqual(importer.parse_issue_type("Pricing is too expensive"), "Objection")
+        self.assertEqual(importer.parse_method("WhatsApp"), "WhatsApp")
+
+        rows = [
+            (2, ["9876543210", "John", "App crashes on login", "Bug", "60"]),
+            (3, ["9123456780", "Jane", "Needs bulk export", "Feature", "0"]),
+            (4, ["invalid-phone", "Bob", "Feedback text", "Problem", "0"]),
+            (5, ["9988776655", "Alice", "", "", "0"]),
+        ]
+        res, blank = importer.classify_feedback(rows, m, {"+919876543210": "Acme Corp"})
+        self.assertEqual(len(res), 4)
+        self.assertEqual(res[0]["kind"], "existing_customer")
+        self.assertEqual(res[0]["record"]["issue_type"], "Problem")
+        self.assertEqual(res[1]["kind"], "new_customer")
+        self.assertEqual(res[1]["record"]["issue_type"], "Feature request")
+        self.assertEqual(res[2]["kind"], "invalid")
+        self.assertEqual(res[3]["kind"], "invalid")  # empty feedback and issue
+
+    def test_same_phone_multiple_feedbacks_in_file(self):
+        headers = ["Phone", "Feedback", "Issue Category"]
+        m = importer.guess_feedback_mapping(headers)
+        rows = [
+            (2, ["9876543210", "First call: Customer busy, asked to call later", "Problem"]),
+            (3, ["9876543210", "Second call: Customer answered, discussed pricing", "Objection"]),
+            (4, ["9876543210", "Third call: Follow-up done, interested in plan", ""]),
+        ]
+        res, blank = importer.classify_feedback(rows, m, {})
+        self.assertEqual(len(res), 3)
+        # All three rows must be valid and none skipped!
+        self.assertEqual(res[0]["kind"], "new_customer")
+        self.assertEqual(res[1]["kind"], "existing_customer")
+        self.assertEqual(res[2]["kind"], "existing_customer")
+        self.assertIn("Same number as row 2", res[1]["reason"])
+        self.assertIn("Same number as row 2", res[2]["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

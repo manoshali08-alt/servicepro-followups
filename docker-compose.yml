@@ -1,7 +1,7 @@
 services:
   app:
     build: .
-    ports: ["8000:8000"]
+    ports: ["${PORT:-8000}:8000"]
     environment:
       APP_ENV: ${APP_ENV:-development}      # use "production" only behind HTTPS (cookies become Secure)
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}

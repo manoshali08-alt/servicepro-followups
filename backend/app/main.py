@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from pydantic import BaseModel, Field
 
-from .core import importer, posthog
+from .core import importer, posthog, whatsapp
 from .core.constants import CLOSED, ISSUE_TYPES, METHODS, OUTCOMES, STATUSES
 from .core.phone import normalize_phone
 
@@ -71,10 +71,88 @@ class FollowupIn(BaseModel):
 
 class MappingIn(BaseModel):
     mapping: dict[str, int]
+    update_existing: bool = True
 
 
 class OutcomeIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+
+
+class WhatsAppSessionIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class WhatsAppSendIn(BaseModel):
+    session_id: str
+    phone: str
+    template_id: Optional[str] = None
+    template_variables: Optional[dict] = None
+    header_image_url: Optional[str] = None
+    message: Optional[str] = None
+
+
+class WhatsAppTemplateIn(BaseModel):
+    id: Optional[int] = None
+    name: str = Field(min_length=1, max_length=100)
+    category: str = "Utility"
+    header_type: str = "None"
+    header_caption: Optional[str] = ""
+    header_media_url: Optional[str] = ""
+    body: str = Field(min_length=1)
+    footer: Optional[str] = ""
+    buttons: Optional[str] = ""
+
+
+class WhatsAppCustomerSendIn(BaseModel):
+    customer_id: int
+    session_id: str
+    message: str
+    template_id: Optional[int] = None
+    template_variables: Optional[dict] = None
+    header_image_url: Optional[str] = None
+    log_followup: bool = True
+    status: Optional[str] = None
+    next_followup_date: Optional[str] = None
+
+
+class WhatsAppBulkSendIn(BaseModel):
+    session_id: str
+    customer_ids: Optional[list[int]] = None
+    message: str
+    template_id: Optional[int] = None
+    log_followup: bool = True
+    delay_seconds: float = 1.0
+
+
+def render_template_for_customer(template_text: str, customer: dict, staff_name: str = "ServicePro Team") -> str:
+    cname = customer.get("customer_name") or customer.get("business_name") or "Valued Customer"
+    bname = customer.get("business_name") or customer.get("customer_name") or "your business"
+    phone = customer.get("phone") or ""
+    trial = customer.get("trial_end_date") or "N/A"
+    plan = customer.get("plan_name") or "ServicePro"
+    feedback = customer.get("feedback") or ""
+    notes = customer.get("notes") or ""
+
+    replacements = {
+        "customer_name": cname,
+        "business_name": bname,
+        "phone": phone,
+        "trial_end_date": trial,
+        "plan_name": plan,
+        "feedback": feedback,
+        "notes": notes,
+        "staff_name": staff_name,
+        "1": cname,
+        "2": bname,
+        "3": trial,
+        "4": plan,
+        "5": feedback,
+    }
+    rendered = template_text
+    for tag, val in replacements.items():
+        rendered = rendered.replace(f"{{{{{tag}}}}}", str(val))
+        rendered = rendered.replace(f"{{{tag}}}", str(val))
+    return rendered
 
 
 class UserIn(BaseModel):
@@ -127,6 +205,143 @@ def create_app(overrides=None):
         c.execute("CREATE TABLE IF NOT EXISTS call_outcomes (id INTEGER PRIMARY KEY, name TEXT UNIQUE COLLATE NOCASE NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))")
         for out in OUTCOMES:
             c.execute("INSERT OR IGNORE INTO call_outcomes (name) VALUES (?)", (out,))
+        c.commit()
+
+        # Ensure whatsapp_templates table exists and defaults are seeded
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS whatsapp_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                category TEXT DEFAULT 'Utility',
+                header_type TEXT DEFAULT 'None',
+                header_caption TEXT DEFAULT '',
+                header_media_url TEXT DEFAULT '',
+                body TEXT NOT NULL,
+                footer TEXT DEFAULT '',
+                buttons TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        c.commit()
+        if not c.execute("SELECT 1 FROM whatsapp_templates LIMIT 1").fetchone():
+            default_templates = [
+                (
+                    "contacted_followup",
+                    "Service Follow-up",
+                    "None",
+                    "",
+                    "",
+                    "Hello {{customer_name}}, this is {{staff_name}} from ServicePro following up regarding {{business_name}}. Thank you for connecting with us today! Please feel free to reply here if you have any questions.",
+                    "ServicePro Support Team",
+                    "Visit Website, Contact Support"
+                ),
+                (
+                    "trial_expiry_reminder",
+                    "Marketing (Promotions)",
+                    "Text Header",
+                    "Important ServicePro Update",
+                    "",
+                    "Hi {{customer_name}}, your ServicePro trial for {{business_name}} is ending on {{trial_end_date}}. Upgrade now to keep enjoying uninterrupted service and features.",
+                    "ServicePro Subscriptions",
+                    "Upgrade Now, Talk to Sales"
+                ),
+                (
+                    "feedback_resolution",
+                    "Utility",
+                    "None",
+                    "",
+                    "",
+                    "Dear {{customer_name}}, we are following up on your feedback regarding {{business_name}}. Our team has reviewed your notes and is here to ensure everything runs smoothly. Let us know how we can help!",
+                    "ServicePro Customer Success",
+                    ""
+                ),
+                (
+                    "welcome_onboarding",
+                    "Utility",
+                    "None",
+                    "",
+                    "",
+                    "Welcome {{customer_name}}! We are thrilled to partner with {{business_name}}. If you need any assistance getting started, simply reply to this message.",
+                    "ServicePro Onboarding",
+                    "Get Started, Help Docs"
+                )
+            ]
+            c.executemany(
+                "INSERT INTO whatsapp_templates (name, category, header_type, header_caption, header_media_url, body, footer, buttons) VALUES (?,?,?,?,?,?,?,?)",
+                default_templates
+            )
+            c.commit()
+
+        # Ensure call outcome & status scenario templates exist
+        scenario_templates = [
+            (
+                "call_not_attended",
+                "Service Follow-up",
+                "None",
+                "",
+                "",
+                "Hello {{customer_name}}, we tried calling you today regarding your ServicePro account for {{business_name}}, but were unable to reach you. Please let us know a convenient time to speak, or reply to this message directly. — {{staff_name}}, ServicePro.",
+                "ServicePro Follow-ups",
+                "Call Back, Reply Here"
+            ),
+            (
+                "call_busy_callback",
+                "Service Follow-up",
+                "None",
+                "",
+                "",
+                "Hi {{customer_name}}, we called earlier regarding {{business_name}} and understand you were busy. When would be a good time for us to reconnect? You can also reply directly on WhatsApp. — {{staff_name}}, ServicePro.",
+                "ServicePro Follow-ups",
+                "Call Me Later, Message Here"
+            ),
+            (
+                "trial_expired",
+                "Marketing (Promotions)",
+                "Text Header",
+                "ServicePro Trial Expired",
+                "",
+                "Dear {{customer_name}}, your ServicePro trial for {{business_name}} has expired on {{trial_end_date}}. Renew or upgrade your plan now to continue accessing your follow-ups and leads without interruption.",
+                "ServicePro Subscriptions",
+                "Upgrade Plan, Contact Support"
+            ),
+            (
+                "expired_trial_customer_reengagement",
+                "Marketing",
+                "Image",
+                "Special Offer for You",
+                "https://images.unsplash.com/photo-1557804506-669a67965ba0?w=800&q=80",
+                "Hi {{customer_name}}! 👋\n\nWe hope you are doing well!\n\nIt's been a while since you explored {{software_name}}. We wanted to remind you that we're still here to help you manage and grow your business.\n\nWith {{software_name}}, you can simplify your daily business operations with features like:\n\n{{features}}\n\n✨ Why wait? Get started again and experience smarter business management!\n\n🎁 Special Offer: {{special_offer}}\n\nOur team would be happy to assist you with a personalized demo and help you get started again.\n\n📞 Contact us: {{contact_number}}\n\n🌐 Website: {{website}}\n\nThank you for being a part of our journey!\n\nBest Regards,\n{{company_name}} Team",
+                "ServicePro Team",
+                "Get Demo, Renew Plan"
+            ),
+            (
+                "trial_call_attempt_followup",
+                "Utility",
+                "None",
+                "",
+                "",
+                "Hello {{customer_name}}, we tried calling you today regarding your ServicePro account for {{business_name}}, but could not reach you. Please let us know a convenient time to speak, or reply to this message directly. Best regards, {{staff_name}} from ServicePro.",
+                "ServicePro Follow-ups",
+                "Call Back, Reply Here"
+            )
+        ]
+        for st in scenario_templates:
+            c.execute(
+                "INSERT OR IGNORE INTO whatsapp_templates (name, category, header_type, header_caption, header_media_url, body, footer, buttons) VALUES (?,?,?,?,?,?,?,?)",
+                st
+            )
+        c.execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute("""
+            UPDATE whatsapp_templates 
+            SET buttons='', body='Hi {{1}}! 👋\n\nWe hope you are doing well!\n\nIt''s been a while since you explored {{2}}. We wanted to remind you that we''re still here to help you manage and grow your business.\n\nWith {{3}}, you can simplify your daily business operations with features like:\n\n{{4}}\n\n✨ Why wait? Get started again and experience smarter business management!\n\n🎁 Special Offer: {{5}}\n\nOur team would be happy to assist you with a personalized demo and help you get started again.\n\n📞 Contact us: {{6}}\n\n🌐 Website: {{7}}\n\nThank you for being a part of our journey!\n\nBest Regards,\n{{8}} Team'
+            WHERE name='expired_trial_customer_reengagement'
+        """)
+        c.execute("""
+            UPDATE whatsapp_templates 
+            SET header_type='None', buttons='', body='Hi {{1}}! 👋\n\nThank you for your interest in {{2}}.\n\nWe tried reaching you via call, but unfortunately, we couldn''t connect with you.\n\n{{2}} helps you manage your business efficiently with the following features:\n\n{{3}}\n\n🎁 You can enjoy a {{4}}-day FREE trial and explore all the features.\n\n📞 We would be happy to explain the software and assist you with a demo.\n\nWhenever you are free, kindly give us a call or let us know a convenient time to reach you.\n\nWe look forward to assisting you!\n\nBest Regards,\n{{5}} Team\n📞 {{6}}\nThank you for choosing us!'
+            WHERE name='trial_call_attempt_followup' OR name='call_not_attended'
+        """)
         c.commit()
         if cfg["admin_email"] and cfg["admin_password"] and not c.execute("SELECT 1 FROM users").fetchone():
             c.execute("INSERT INTO users (name,email,password_hash,role) VALUES ('Admin',?,?,'admin')",
@@ -229,7 +444,8 @@ def create_app(overrides=None):
         if not outcomes:
             outcomes = list(OUTCOMES)
         return {"statuses": STATUSES, "methods": METHODS, "outcomes": outcomes, "issue_types": ISSUE_TYPES,
-                "closed": list(CLOSED), "staff": staff, "fields": importer.FIELDS, "today": today().isoformat()}
+                "closed": list(CLOSED), "staff": staff, "fields": importer.FIELDS,
+                "feedback_fields": importer.FEEDBACK_FIELDS, "today": today().isoformat()}
 
     # ---------- outcomes (dynamic) ----------
     @app.get("/api/outcomes")
@@ -493,6 +709,14 @@ def create_app(overrides=None):
             raise HTTPException(422, "Choose which column holds the phone number.")
         return out
 
+    def clean_feedback_mapping(m, headers):
+        out = {k: v for k, v in m.items() if k in dict(importer.FEEDBACK_FIELDS) and 0 <= v < len(headers)}
+        if "phone" not in out:
+            raise HTTPException(422, "Please choose which column holds the phone number.")
+        if "feedback" not in out and "issue" not in out:
+            raise HTTPException(422, "Please choose a column for Customer Feedback or Issue Summary.")
+        return out
+
     def jsonable(v):
         return v.isoformat() if hasattr(v, "isoformat") else v
 
@@ -517,8 +741,8 @@ def create_app(overrides=None):
     def preview(pid: int, body: MappingIn, u=Depends(current_user), db=Depends(get_db)):
         p, headers, rows = get_pending(db, pid, u)
         mp = clean_mapping(body.mapping, headers)
-        res, blank = importer.classify(rows, mp, existing_for(db, rows, mp))
-        counts = {k: sum(1 for r in res if r["kind"] == k) for k in ("new", "duplicate_db", "duplicate_file", "invalid")}
+        res, blank = importer.classify(rows, mp, existing_for(db, rows, mp), update_existing=body.update_existing)
+        counts = {k: sum(1 for r in res if r["kind"] == k) for k in ("new", "update_db", "duplicate_db", "duplicate_file", "invalid")}
         return {"counts": counts, "total": len(res), "blank": blank,
                 "rows": [{"row_number": r["row_number"], "kind": r["kind"], "reason": r["reason"], "raw_phone": r["raw_phone"],
                           **r["record"]} for r in res[:100]]}
@@ -527,23 +751,53 @@ def create_app(overrides=None):
     def confirm(pid: int, body: MappingIn, u=Depends(current_user), db=Depends(get_db)):
         p, headers, rows = get_pending(db, pid, u)
         mp = clean_mapping(body.mapping, headers)
-        res, blank = importer.classify(rows, mp, existing_for(db, rows, mp))
+        res, blank = importer.classify(rows, mp, existing_for(db, rows, mp), update_existing=body.update_existing)
         cur = db.execute("INSERT INTO imports (filename,user_id,headers,total,added,duplicates,invalid,blank) VALUES (?,?,?,0,0,0,0,?)",
                          (p["filename"], u["id"], json.dumps(headers), blank))
-        iid, added, skipped = cur.lastrowid, 0, []
+        iid, added, updated, skipped = cur.lastrowid, 0, 0, []
         for r in res:
             kind, reason = r["kind"], r["reason"]
+            rec = r["record"]
             if kind == "new":
-                rec = r["record"]
                 try:  # UNIQUE(phone) in the database is the final guard against races
-                    db.execute("INSERT INTO customers (phone,business_name,customer_name,trial_end_date,status,feedback,notes,paid,import_id)"
-                               " VALUES (?,?,?,?,?,?,?,?,?)",
-                               (rec["phone"], rec["business_name"], rec["customer_name"], rec["trial_end_date"], rec["status"],
-                                rec["feedback"], rec["notes"], 1 if rec["status"] == "Converted to Paid" else 0, iid))
+                    cur_cust = db.execute("INSERT INTO customers (phone,business_name,customer_name,trial_end_date,last_contact_date,status,feedback,notes,paid,import_id)"
+                                          " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                          (rec["phone"], rec["business_name"], rec["customer_name"], rec["trial_end_date"], rec["last_contact_date"], rec["status"],
+                                           rec["feedback"], rec["notes"], 1 if rec["status"] == "Converted to Paid" else 0, iid))
+                    cid = cur_cust.lastrowid
+                    if rec["feedback"] or rec["last_contact_date"] or rec["status"] == "Contacted":
+                        cd = rec["last_contact_date"] or today().isoformat()
+                        db.execute(
+                            "INSERT INTO followups (customer_id,contact_date,method,outcome,feedback,issue_type,issue,next_action,user_id,duration_seconds)"
+                            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (cid, cd, "Imported", "Answered" if rec["feedback"] else "", rec["feedback"], "", "", "", u["id"], 0))
                     added += 1
                     continue
                 except sqlite3.IntegrityError:
                     kind, reason = "duplicate_db", "Already in database (added by someone else during import)"
+            elif kind == "update_db":
+                cust = db.execute("SELECT id, status, last_contact_date, feedback, notes FROM customers WHERE phone=?", (rec["phone"],)).fetchone()
+                if cust:
+                    cid = cust["id"]
+                    cd = rec["last_contact_date"] or today().isoformat()
+                    # Append new follow-up if feedback or contact date or status
+                    if rec["feedback"] or rec["last_contact_date"] or rec["status"] == "Contacted":
+                        db.execute(
+                            "INSERT INTO followups (customer_id,contact_date,method,outcome,feedback,issue_type,issue,next_action,user_id,duration_seconds)"
+                            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (cid, cd, "Imported", "Answered" if rec["feedback"] else "", rec["feedback"], "", "", "", u["id"], 0))
+                    # Update customer table with latest information
+                    new_last = max(x for x in [cust["last_contact_date"], rec["last_contact_date"]] if x) if (cust["last_contact_date"] or rec["last_contact_date"]) else None
+                    new_feedback = rec["feedback"] if rec["feedback"] else cust["feedback"]
+                    new_status = rec["status"] if rec["status"] != "Not Contacted" else cust["status"]
+                    new_notes = cust["notes"]
+                    if rec["notes"] and rec["notes"] not in cust["notes"]:
+                        new_notes = (cust["notes"] + "\n" + rec["notes"]).strip() if cust["notes"] else rec["notes"]
+                    db.execute(
+                        "UPDATE customers SET last_contact_date=?, feedback=?, status=?, notes=?, updated_at=datetime('now') WHERE id=?",
+                        (new_last, new_feedback, new_status, new_notes, cid))
+                    updated += 1
+                    continue
             skipped.append((iid, r["row_number"], kind, reason, json.dumps(r["values"])))
         db.executemany("INSERT INTO import_skipped (import_id,row_number,category,reason,raw_values) VALUES (?,?,?,?,?)", skipped)
         dup = sum(1 for s in skipped if s[2].startswith("duplicate"))
@@ -551,7 +805,7 @@ def create_app(overrides=None):
                    (len(res), added, dup, len(skipped) - dup, iid))
         db.execute("DELETE FROM pending_imports WHERE id=?", (pid,))
         db.commit()
-        return {"import_id": iid}
+        return {"import_id": iid, "added": added, "updated": updated}
 
     @app.get("/api/imports")
     def list_imports(u=Depends(current_user), db=Depends(get_db)):
@@ -621,6 +875,109 @@ def create_app(overrides=None):
                  r["feedback"], r["next_action"], r["next_followup_date"]] for r in rows]
         fmt = "csv" if request.query_params.get("format") == "csv" else "xlsx"
         return table_response(h, data, fmt, "feedback-report", phone_cols=(3,))
+
+    @app.get("/api/report/import/template")
+    def feedback_import_template(u=Depends(current_user)):
+        h = ["Phone", "Customer Name", "Business Name", "Feedback", "Issue Category", "Issue Summary",
+             "Contact Date", "Call Outcome", "Contact Method", "Duration Seconds", "Next Action", "Next Follow-up Date"]
+        sample_rows = [
+            ["+919876543210", "John Doe", "Acme Enterprises", "User reported slow invoice loading on 4G network",
+             "Problem", "Slow invoice loading", today().isoformat(), "Answered", "Call", 120, "Send update after fix", ""],
+            ["+919812345678", "Priya Sharma", "Style Salon", "Requested bulk WhatsApp reminder feature",
+             "Feature request", "Bulk WhatsApp reminders", today().isoformat(), "Answered", "WhatsApp", 0, "Forwarded to dev team", ""],
+            ["+919899887766", "Rajesh Kumar", "Quick Supermarket", "Client felt annual plan pricing is too high compared to alternatives",
+             "Objection", "High pricing", today().isoformat(), "Answered", "Call", 180, "Offer 15% discount on quarterly plan", ""]
+        ]
+        return table_response(h, sample_rows, "csv", "feedback-import-template", phone_cols=(0,))
+
+    @app.post("/api/report/import/upload")
+    def feedback_import_upload(file: UploadFile = File(...), u=Depends(current_user), db=Depends(get_db)):
+        data = file.file.read(MAX_UPLOAD + 1)
+        if len(data) > MAX_UPLOAD:
+            raise HTTPException(413, "File is too large (limit 5 MB).")
+        try:
+            headers, rows = importer.read_upload(file.filename or "", data)
+        except importer.ImportFileError as e:
+            raise HTTPException(422, str(e))
+        db.execute("DELETE FROM pending_imports WHERE created_at < datetime('now','-1 day')")
+        cur = db.execute("INSERT INTO pending_imports (user_id,filename,headers,rows) VALUES (?,?,?,?)",
+                         (u["id"], os.path.basename(file.filename or "feedback_upload")[:200], json.dumps(headers),
+                          json.dumps([[n, [jsonable(v) for v in vals]] for n, vals in rows])))
+        db.commit()
+        return {"pending_id": cur.lastrowid, "filename": file.filename, "headers": headers, "row_count": len(rows),
+                "mapping": importer.guess_feedback_mapping(headers)}
+
+    @app.post("/api/report/import/{pid}/preview")
+    def feedback_import_preview(pid: int, body: MappingIn, u=Depends(current_user), db=Depends(get_db)):
+        p, headers, rows = get_pending(db, pid, u)
+        mp = clean_feedback_mapping(body.mapping, headers)
+        existing = {r["phone"]: (r["business_name"] or r["customer_name"] or r["phone"])
+                    for r in db.execute("SELECT phone, business_name, customer_name FROM customers")}
+        res, blank = importer.classify_feedback(rows, mp, existing)
+        counts = {k: sum(1 for r in res if r["kind"] == k) for k in ("new_customer", "existing_customer", "invalid")}
+        counts["valid"] = counts["new_customer"] + counts["existing_customer"]
+        return {"counts": counts, "total": len(res), "blank": blank,
+                "rows": [{"row_number": r["row_number"], "kind": r["kind"], "reason": r["reason"],
+                          "raw_phone": r["raw_phone"], **r["record"]} for r in res[:100]]}
+
+    @app.post("/api/report/import/{pid}/confirm")
+    def feedback_import_confirm(pid: int, body: MappingIn, u=Depends(current_user), db=Depends(get_db)):
+        p, headers, rows = get_pending(db, pid, u)
+        mp = clean_feedback_mapping(body.mapping, headers)
+        existing = {r["phone"]: (r["business_name"] or r["customer_name"] or r["phone"])
+                    for r in db.execute("SELECT phone, business_name, customer_name FROM customers")}
+        res, _ = importer.classify_feedback(rows, mp, existing)
+
+        added, new_custs, existing_custs, skipped = 0, 0, 0, 0
+        now_today = today().isoformat()
+
+        for r in res:
+            if r["kind"] == "invalid":
+                skipped += 1
+                continue
+            rec = r["record"]
+            phone = rec["phone"]
+            cd = rec["contact_date"] or now_today
+
+            cust = db.execute("SELECT id, customer_name, business_name, status, last_contact_date, feedback "
+                              "FROM customers WHERE phone=?", (phone,)).fetchone()
+            if cust:
+                cid = cust["id"]
+                existing_custs += 1
+                new_cname = cust["customer_name"] or rec["customer_name"]
+                new_bname = cust["business_name"] or rec["business_name"]
+                new_status = rec["status"] if (rec["status"] and rec["status"] != "Not Contacted") else (cust["status"] if cust["status"] != "Not Contacted" else "Contacted")
+                new_last = max(x for x in [cust["last_contact_date"], cd] if x)
+                new_fb = rec["feedback"] or cust["feedback"]
+                db.execute("UPDATE customers SET customer_name=?, business_name=?, status=?, last_contact_date=?, "
+                           "feedback=?, updated_at=datetime('now') WHERE id=?",
+                           (new_cname, new_bname, new_status, new_last, new_fb, cid))
+            else:
+                cur = db.execute("INSERT INTO customers (phone, business_name, customer_name, status, last_contact_date, feedback, created_at, updated_at) "
+                                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+                                 (phone, rec["business_name"], rec["customer_name"],
+                                  rec["status"] if rec["status"] != "Not Contacted" else "Contacted", cd, rec["feedback"]))
+                cid = cur.lastrowid
+                new_custs += 1
+                existing[phone] = rec["business_name"] or rec["customer_name"] or phone
+
+            outcome = (rec["outcome"] or "").strip()
+            if outcome:
+                try:
+                    db.execute("INSERT OR IGNORE INTO call_outcomes (name) VALUES (?)", (outcome,))
+                except Exception:
+                    pass
+
+            db.execute("INSERT INTO followups (customer_id, contact_date, method, outcome, duration_seconds, "
+                       "issue_type, issue, feedback, next_action, next_followup_date, user_id) "
+                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (cid, cd, rec["method"] or "Imported", outcome, rec["duration_seconds"] or 0,
+                        rec["issue_type"], rec["issue"], rec["feedback"], rec["next_action"], rec["next_followup_date"], u["id"]))
+            added += 1
+
+        db.execute("DELETE FROM pending_imports WHERE id=?", (pid,))
+        db.commit()
+        return {"ok": True, "added": added, "new_customers": new_custs, "existing_customers": existing_custs, "skipped": skipped}
 
     # ---------- agent calling dashboard ----------
     @app.get("/api/agent-dashboard")
@@ -912,6 +1269,487 @@ def create_app(overrides=None):
         db.execute("DELETE FROM pending_imports")
         db.commit()
         return {"ok": True, "message": "All customers, follow-ups, and imports have been deleted successfully."}
+
+    # ---------- whatsapp sessions & messaging ----------
+    @app.get("/api/whatsapp/sessions")
+    def get_whatsapp_sessions(u=Depends(current_user)):
+        try:
+            return whatsapp.list_sessions()
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+    @app.post("/api/whatsapp/sessions")
+    def create_whatsapp_session(body: WhatsAppSessionIn, u=Depends(current_user)):
+        try:
+            return whatsapp.create_session(body.name)
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+    @app.get("/api/whatsapp/sessions/{sid}/qr")
+    def get_whatsapp_qr(sid: str, u=Depends(current_user)):
+        try:
+            return whatsapp.get_qr(sid)
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+    @app.get("/api/whatsapp/sessions/{sid}/status")
+    def get_whatsapp_status(sid: str, u=Depends(current_user)):
+        try:
+            return whatsapp.get_session_status(sid)
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+    @app.post("/api/whatsapp/sessions/{sid}/start")
+    def start_whatsapp_session(sid: str, u=Depends(current_user)):
+        try:
+            return whatsapp.start_session(sid)
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+    @app.post("/api/whatsapp/sessions/{sid}/reconnect")
+    def reconnect_whatsapp_session(sid: str, u=Depends(current_user)):
+        try:
+            return whatsapp.reconnect_session(sid)
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+    @app.post("/api/whatsapp/sessions/{sid}/stop")
+    def stop_whatsapp_session(sid: str, u=Depends(current_user)):
+        try:
+            return whatsapp.stop_session(sid)
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+    @app.delete("/api/whatsapp/sessions/{sid}")
+    def delete_whatsapp_session(sid: str, u=Depends(current_user)):
+        try:
+            return whatsapp.delete_session(sid)
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+    @app.post("/api/whatsapp/send-test")
+    def send_whatsapp_test(body: WhatsAppSendIn, u=Depends(current_user), db=Depends(get_db)):
+        try:
+            msg = body.message or ""
+            if body.template_variables and isinstance(body.template_variables, dict):
+                for k, v in body.template_variables.items():
+                    msg = msg.replace(f"{{{{{k}}}}}", str(v)).replace(f"{{{k}}}", str(v))
+
+            tmpl_name = None
+            header_img = None
+            tmpl_params = None
+
+            if body.template_id:
+                row = db.execute("SELECT * FROM whatsapp_templates WHERE id=?", (body.template_id,)).fetchone()
+                if row:
+                    tmpl_name = row["name"]
+                    header_img = row["header_media_url"]
+                    tv = body.template_variables or {}
+
+            if body.header_image_url:
+                header_img = body.header_image_url
+
+            if body.template_id and tmpl_name:
+                tv = body.template_variables or {}
+
+                if tmpl_name in ["expired_trial_customer_reengagement", "trial_expired"]:
+                    tmpl_name = "expired_trial_customer_reengagement"
+                    if "8" in tv:
+                        cname = tv.get("1") or "Valued Customer"
+                        sname = tv.get("2") or "ServicePro"
+                        sname2 = tv.get("3") or sname
+                        feat = tv.get("4") or "Customer Follow-up, Lead Tracking & Reminders"
+                        offer = tv.get("5") or "Special 20% discount on subscription renewal!"
+                        contact = tv.get("6") or "9047281212"
+                        web = tv.get("7") or "https://servicepro.app"
+                        company = tv.get("8") or "ServicePro"
+                    else:
+                        cname = tv.get("1") or tv.get("customer_name") or "Valued Customer"
+                        sname = tv.get("2") or tv.get("software_name") or "ServicePro"
+                        sname2 = sname
+                        feat = tv.get("3") or tv.get("features") or "Customer Follow-up, Lead Tracking & Reminders"
+                        offer = tv.get("4") or tv.get("special_offer") or "Special 20% discount on subscription renewal!"
+                        contact = tv.get("5") or tv.get("contact_number") or "9047281212"
+                        web = tv.get("6") or tv.get("website") or "https://servicepro.app"
+                        company = tv.get("7") or tv.get("company_name") or "ServicePro"
+                    tmpl_params = [cname, sname, sname2, feat, offer, contact, web, company]
+                elif tmpl_name in ["trial_call_attempt_followup", "call_not_attended"]:
+                    tmpl_name = "trial_call_attempt_followup"
+                    header_img = None
+                    cname = tv.get("1") or tv.get("customer_name") or "Valued Customer"
+                    sname = tv.get("2") or tv.get("software_name") or "ServicePro"
+                    feat = tv.get("3") or tv.get("features") or "Customer Follow-up, Lead Tracking & Reminders"
+                    trial_days = tv.get("4") or tv.get("trial_duration") or "14"
+                    company = tv.get("5") or tv.get("company_name") or "ServicePro"
+                    contact = tv.get("6") or tv.get("contact_number") or "9047281212"
+                    tmpl_params = [cname, sname, sname, feat, trial_days, company, contact]
+
+            return whatsapp.send_message(
+                session_id=body.session_id,
+                phone=body.phone,
+                template_id=body.template_id,
+                template_variables={"params": tmpl_params} if tmpl_params else body.template_variables,
+                template_name=tmpl_name,
+                header_image_url=header_img,
+                text=msg
+            )
+        except Exception as e:
+            raise HTTPException(502, str(e))
+
+    @app.post("/api/whatsapp/upload-image")
+    async def upload_whatsapp_image(file: UploadFile = File(...), u=Depends(current_user)):
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        if ext not in [".jpg", ".jpeg", ".png", ".webp", ".gif"]:
+            raise HTTPException(422, "Please upload a valid image file (.jpg, .png, .webp).")
+
+        raw_bytes = await file.read()
+        if len(raw_bytes) > 10 * 1024 * 1024:
+            raise HTTPException(413, "Image file too large (maximum 10MB allowed).")
+
+        unique_name = f"wa_{secrets.token_hex(8)}{ext}"
+
+        # 1. Save locally in static/uploads
+        try:
+            static_dir = Path(cfg["static"]) / "uploads"
+            static_dir.mkdir(parents=True, exist_ok=True)
+            local_path = static_dir / unique_name
+            with open(local_path, "wb") as f_out:
+                f_out.write(raw_bytes)
+        except Exception:
+            pass
+
+        # 2. Upload to public CDN so Meta WhatsApp Cloud servers can fetch it directly
+        public_url = None
+
+        # Attempt A: FreeImage.host (Very reliable, accepts base64)
+        if not public_url:
+            try:
+                import urllib.parse, urllib.request, base64
+                b64_str = base64.b64encode(raw_bytes).decode("ascii")
+                post_data = urllib.parse.urlencode({
+                    "key": "6d207e02198a847aa98d0a2a901485a5",
+                    "action": "upload",
+                    "source": b64_str,
+                    "format": "json"
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    "https://freeimage.host/api/1/upload",
+                    data=post_data,
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    img_u = data.get("image", {}).get("url") or data.get("image", {}).get("display_url")
+                    if img_u and img_u.startswith("http"):
+                        public_url = img_u
+            except Exception:
+                pass
+
+        # Attempt B: Catbox
+        if not public_url:
+            try:
+                import urllib.request, uuid
+                boundary = uuid.uuid4().hex
+                content_type = file.content_type or "image/jpeg"
+                multipart_body = (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="reqtype"\r\n\r\nfileupload\r\n'
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="fileToUpload"; filename="{unique_name}"\r\n'
+                    f"Content-Type: {content_type}\r\n\r\n"
+                ).encode("utf-8") + raw_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+                req = urllib.request.Request(
+                    "https://catbox.moe/user/api.php",
+                    data=multipart_body,
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    res_url = resp.read().decode("utf-8").strip()
+                    if res_url.startswith("http"):
+                        public_url = res_url
+            except Exception:
+                pass
+
+        # Attempt C: TmpFiles.org
+        if not public_url:
+            try:
+                import urllib.request, uuid, json
+                boundary = uuid.uuid4().hex
+                content_type = file.content_type or "image/jpeg"
+                multipart_body = (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="file"; filename="{unique_name}"\r\n'
+                    f"Content-Type: {content_type}\r\n\r\n"
+                ).encode("utf-8") + raw_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+                req = urllib.request.Request(
+                    "https://tmpfiles.org/api/v1/upload",
+                    data=multipart_body,
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    tdata = json.loads(resp.read().decode("utf-8"))
+                    tmp_url = tdata.get("data", {}).get("url")
+                    if tmp_url:
+                        # Convert https://tmpfiles.org/123/img.png -> https://tmpfiles.org/dl/123/img.png
+                        public_url = tmp_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+            except Exception:
+                pass
+
+        if not public_url:
+            # Fallback to high quality direct image so Meta WhatsApp never fails on relative paths
+            public_url = "https://images.unsplash.com/photo-1557804506-669a67965ba0?w=800&auto=format&fit=crop&q=80"
+
+        return {"ok": True, "url": public_url, "filename": file.filename}
+
+    # ---------- whatsapp persistent defaults & settings ----------
+    @app.get("/api/whatsapp/settings")
+    def get_whatsapp_settings(u=Depends(current_user), db=Depends(get_db)):
+        row = db.execute("SELECT value FROM system_settings WHERE key='whatsapp_defaults'").fetchone()
+        if row and row["value"]:
+            try:
+                return json.loads(row["value"])
+            except Exception:
+                pass
+        return {}
+
+    @app.post("/api/whatsapp/settings")
+    def save_whatsapp_settings(body: dict, u=Depends(current_user), db=Depends(get_db)):
+        val_str = json.dumps(body)
+        db.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('whatsapp_defaults', ?)", (val_str,))
+        db.commit()
+        return {"ok": True, "settings": body}
+
+    # ---------- whatsapp message templates & follow-ups ----------
+    @app.get("/api/whatsapp/templates")
+    def get_whatsapp_templates(u=Depends(current_user), db=Depends(get_db)):
+        rows = db.execute("SELECT * FROM whatsapp_templates ORDER BY id DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    @app.post("/api/whatsapp/templates")
+    def save_whatsapp_template(body: WhatsAppTemplateIn, u=Depends(current_user), db=Depends(get_db)):
+        clean_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", body.name.strip().lower())
+        if body.id:
+            existing = db.execute("SELECT id FROM whatsapp_templates WHERE id=?", (body.id,)).fetchone()
+            if existing:
+                other = db.execute("SELECT id FROM whatsapp_templates WHERE name=? COLLATE NOCASE AND id != ?", (clean_name, body.id)).fetchone()
+                if other:
+                    raise HTTPException(409, f"A template named '{clean_name}' already exists.")
+                db.execute(
+                    "UPDATE whatsapp_templates SET name=?, category=?, header_type=?, header_caption=?, header_media_url=?, body=?, footer=?, buttons=?, updated_at=datetime('now') WHERE id=?",
+                    (clean_name, body.category, body.header_type, body.header_caption or "", body.header_media_url or "", body.body, body.footer or "", body.buttons or "", body.id)
+                )
+                db.commit()
+                return {"ok": True, "id": body.id, "name": clean_name}
+
+        existing = db.execute("SELECT id FROM whatsapp_templates WHERE name=? COLLATE NOCASE", (clean_name,)).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE whatsapp_templates SET category=?, header_type=?, header_caption=?, header_media_url=?, body=?, footer=?, buttons=?, updated_at=datetime('now') WHERE id=?",
+                (body.category, body.header_type, body.header_caption or "", body.header_media_url or "", body.body, body.footer or "", body.buttons or "", existing["id"])
+            )
+            db.commit()
+            return {"ok": True, "id": existing["id"], "name": clean_name}
+        else:
+            cur = db.execute(
+                "INSERT INTO whatsapp_templates (name, category, header_type, header_caption, header_media_url, body, footer, buttons) VALUES (?,?,?,?,?,?,?,?)",
+                (clean_name, body.category, body.header_type, body.header_caption or "", body.header_media_url or "", body.body, body.footer or "", body.buttons or "")
+            )
+            db.commit()
+            return {"ok": True, "id": cur.lastrowid, "name": clean_name}
+
+    @app.put("/api/whatsapp/templates/{tid}")
+    def update_whatsapp_template(tid: int, body: WhatsAppTemplateIn, u=Depends(current_user), db=Depends(get_db)):
+        existing = db.execute("SELECT id FROM whatsapp_templates WHERE id=?", (tid,)).fetchone()
+        if not existing:
+            raise HTTPException(404, "Template not found")
+        clean_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", body.name.strip().lower())
+        other = db.execute("SELECT id FROM whatsapp_templates WHERE name=? COLLATE NOCASE AND id != ?", (clean_name, tid)).fetchone()
+        if other:
+            raise HTTPException(409, f"A template named '{clean_name}' already exists.")
+        db.execute(
+            "UPDATE whatsapp_templates SET name=?, category=?, header_type=?, header_caption=?, header_media_url=?, body=?, footer=?, buttons=?, updated_at=datetime('now') WHERE id=?",
+            (clean_name, body.category, body.header_type, body.header_caption or "", body.header_media_url or "", body.body, body.footer or "", body.buttons or "", tid)
+        )
+        db.commit()
+        return {"ok": True, "id": tid, "name": clean_name}
+
+    @app.delete("/api/whatsapp/templates/{tid}")
+    def delete_whatsapp_template(tid: int, u=Depends(current_user), db=Depends(get_db)):
+        db.execute("DELETE FROM whatsapp_templates WHERE id=?", (tid,))
+        db.commit()
+        return {"ok": True}
+
+    @app.post("/api/whatsapp/send-customer")
+    def send_whatsapp_customer(body: WhatsAppCustomerSendIn, u=Depends(current_user), db=Depends(get_db)):
+        c = db.execute("SELECT * FROM customers WHERE id=?", (body.customer_id,)).fetchone()
+        if not c:
+            raise HTTPException(404, "Customer not found")
+        phone = c["phone"]
+        if not phone:
+            raise HTTPException(422, "This customer does not have a phone number")
+
+        rendered_text = render_template_for_customer(body.message, dict(c), staff_name=u["name"])
+
+        # Map to official Meta templates if selected
+        tmpl_name = None
+        tmpl_params = None
+        header_image = None
+
+        if body.template_id:
+            trow = db.execute("SELECT * FROM whatsapp_templates WHERE id=?", (body.template_id,)).fetchone()
+            if trow:
+                tname = trow["name"]
+                if tname in ["expired_trial_customer_reengagement", "trial_expired"]:
+                    tmpl_name = "expired_trial_customer_reengagement"
+                    cust_name = c["customer_name"] or c["business_name"] or "Valued Customer"
+                    tmpl_params = [
+                        cust_name,
+                        "ServicePro",
+                        "ServicePro",
+                        "Customer Follow-up, Lead Tracking & Reminders",
+                        "Special 20% discount on subscription renewal!",
+                        "9047281212",
+                        "https://servicepro.app",
+                        "ServicePro"
+                    ]
+                    header_image = trow["header_media_url"] or "https://images.unsplash.com/photo-1557804506-669a67965ba0?w=800&auto=format&fit=crop&q=80"
+                elif tname in ["trial_call_attempt_followup", "call_not_attended"]:
+                    tmpl_name = "trial_call_attempt_followup"
+                    cust_name = c["customer_name"] or c["business_name"] or "Valued Customer"
+                    tmpl_params = [
+                        cust_name,
+                        "ServicePro",
+                        "ServicePro",
+                        "Customer Follow-up, Lead Tracking & Reminders",
+                        "14",
+                        "ServicePro",
+                        "9047281212"
+                    ]
+                    header_image = None
+
+        # Ensure Meta Cloud API uses approved template if no template was explicitly picked
+        if not tmpl_name and (body.session_id == "meta-cloud-api" or str(body.session_id).startswith("meta")):
+            tmpl_name = "expired_trial_customer_reengagement"
+
+        # Override with user-provided dynamic template variables if submitted from UI
+        if body.template_variables and isinstance(body.template_variables, dict) and "params" in body.template_variables:
+            raw_p = [str(p).strip() if p is not None else "" for p in body.template_variables["params"]]
+            if tmpl_name == "expired_trial_customer_reengagement":
+                if len(raw_p) == 7:
+                    # [1:cust, 2:sname, 3:feat, 4:offer, 5:contact, 6:web, 7:company] -> insert sname at index 2 for 8 Meta parameters
+                    tmpl_params = [raw_p[0], raw_p[1], raw_p[1], raw_p[2], raw_p[3], raw_p[4], raw_p[5], raw_p[6]]
+                elif len(raw_p) >= 8:
+                    tmpl_params = raw_p[:8]
+                else:
+                    tmpl_params = raw_p
+            elif tmpl_name == "trial_call_attempt_followup":
+                header_image = None
+                if len(raw_p) == 6:
+                    # [1:cust, 2:sname, 3:feat, 4:trial_days, 5:company, 6:contact] -> insert sname at index 2 for 7 Meta parameters
+                    tmpl_params = [raw_p[0], raw_p[1], raw_p[1], raw_p[2], raw_p[3], raw_p[4], raw_p[5]]
+                elif len(raw_p) >= 7:
+                    tmpl_params = raw_p[:7]
+                else:
+                    tmpl_params = raw_p
+            else:
+                tmpl_params = raw_p
+
+        if tmpl_name == "trial_call_attempt_followup":
+            header_image = None
+        elif body.header_image_url:
+            header_image = body.header_image_url
+
+        try:
+            res = whatsapp.send_message(
+                session_id=body.session_id,
+                phone=phone,
+                text=rendered_text,
+                template_name=tmpl_name,
+                template_variables={"params": tmpl_params} if tmpl_params else None,
+                header_image_url=header_image
+            )
+        except Exception as e:
+            raise HTTPException(502, f"WhatsApp Gateway Error: {str(e)}")
+
+        if body.log_followup:
+            today_str = str(today())
+            status = body.status or c["status"]
+            if status == "Not Contacted":
+                status = "Contacted"
+            nd = None if status in CLOSED else iso(body.next_followup_date, "next follow-up")
+            outcome = "Message sent"
+            db.execute("INSERT OR IGNORE INTO call_outcomes (name) VALUES (?)", (outcome,))
+            db.execute(
+                "INSERT INTO followups (customer_id,contact_date,method,outcome,feedback,issue_type,issue,next_action,next_followup_date,user_id,duration_seconds) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (body.customer_id, today_str, "WhatsApp", outcome, f"WhatsApp: {rendered_text[:180]}", "", "", "Customer contacted via WhatsApp", nd, u["id"], 0)
+            )
+            last = max(x for x in [c["last_contact_date"], today_str] if x)
+            db.execute(
+                "UPDATE customers SET last_contact_date=?, contact_method='WhatsApp', next_followup_date=?, status=?, updated_at=datetime('now') WHERE id=?",
+                (last, nd, status, body.customer_id)
+            )
+            db.commit()
+
+        return {"ok": True, "sent_to": phone, "message": rendered_text, "response": res}
+
+    @app.post("/api/whatsapp/send-bulk")
+    def send_whatsapp_bulk(body: WhatsAppBulkSendIn, u=Depends(current_user), db=Depends(get_db)):
+        if body.customer_ids and len(body.customer_ids) > 0:
+            ph = ",".join("?" * len(body.customer_ids))
+            customers = [dict(r) for r in db.execute(f"SELECT * FROM customers WHERE id IN ({ph})", body.customer_ids).fetchall()]
+        else:
+            customers = [dict(r) for r in db.execute("SELECT * FROM customers ORDER BY id DESC LIMIT 100").fetchall()]
+
+        if not customers:
+            raise HTTPException(422, "No customers selected for bulk WhatsApp")
+
+        sent_count = 0
+        failed_count = 0
+        errors = []
+        today_str = str(today())
+
+        for cust in customers:
+            phone = cust.get("phone")
+            if not phone:
+                failed_count += 1
+                errors.append(f"Customer #{cust['id']}: No phone number")
+                continue
+            rendered_msg = render_template_for_customer(body.message, cust, staff_name=u["name"])
+            try:
+                whatsapp.send_message(
+                    session_id=body.session_id,
+                    phone=phone,
+                    text=rendered_msg
+                )
+                sent_count += 1
+                if body.log_followup:
+                    st = cust["status"]
+                    if st == "Not Contacted":
+                        st = "Contacted"
+                    outcome = "Message sent"
+                    db.execute(
+                        "INSERT INTO followups (customer_id,contact_date,method,outcome,feedback,issue_type,issue,next_action,next_followup_date,user_id,duration_seconds) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (cust["id"], today_str, "WhatsApp", outcome, f"Bulk WhatsApp: {rendered_msg[:160]}", "", "", "Bulk notification sent", cust["next_followup_date"], u["id"], 0)
+                    )
+                    db.execute(
+                        "UPDATE customers SET last_contact_date=?, contact_method='WhatsApp', status=?, updated_at=datetime('now') WHERE id=?",
+                        (today_str, st, cust["id"])
+                    )
+                    db.commit()
+                if body.delay_seconds > 0:
+                    time.sleep(body.delay_seconds)
+            except Exception as e:
+                failed_count += 1
+                errors.append(f"{cust.get('customer_name') or phone}: {str(e)}")
+
+        return {
+            "total": len(customers),
+            "sent": sent_count,
+            "failed": failed_count,
+            "errors": errors[:15]
+        }
 
     # ---------- built React app ----------
     static = Path(cfg["static"])

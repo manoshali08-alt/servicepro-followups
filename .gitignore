@@ -5,3 +5,9 @@ __pycache__/
 *.db*
 data/
 backend/static/
+test_*.py
+debug_*.py
+run_test_*.py
+scan_qr_live.html
+seed_meta_templates.py
+*.log

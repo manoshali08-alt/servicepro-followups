@@ -101,6 +101,9 @@ export default function Customers() {
             {syncing ? '⏳ Syncing PostHog…' : '🔄 Sync from PostHog'}
           </button>
           <Link className="btn" to="/customers/new">+ Add customer</Link>
+          <Link className="btn success" to="/whatsapp" style={{ background: '#25D366', color: '#fff', borderColor: '#16a34a' }} title="Send bulk WhatsApp messages to customers">
+            📢 Bulk WhatsApp
+          </Link>
           <a className="btn alt" href={'/api/export' + qs({ ...params, format: 'xlsx' })}>Export Excel</a>
           <a className="btn alt" href={'/api/export' + qs({ ...params, format: 'csv' })}>Export CSV</a>
           {user && user.role === 'admin' && (

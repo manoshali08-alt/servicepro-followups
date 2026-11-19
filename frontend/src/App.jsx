@@ -10,6 +10,7 @@ import ImportResult from './pages/ImportResult.jsx'
 import Report from './pages/Report.jsx'
 import CallReports from './pages/CallReports.jsx'
 import Team from './pages/Team.jsx'
+import WhatsApp from './pages/WhatsApp.jsx'
 
 const Ctx = createContext(null)
 export const useApp = () => useContext(Ctx)
@@ -48,6 +49,7 @@ export default function App() {
           <NavLink to="/call-reports">Call Reports</NavLink>
           <NavLink to="/report">Feedback report</NavLink>
           <NavLink to="/import">Import</NavLink>
+          <NavLink to="/whatsapp">💬 WhatsApp</NavLink>
           {user.role === 'admin' && <NavLink to="/team">Team</NavLink>}
         </nav>
         <span className="muted">{user.name}</span>
@@ -63,6 +65,7 @@ export default function App() {
           <Route path="/import" element={<ImportPage />} />
           <Route path="/imports/:id" element={<ImportResult />} />
           <Route path="/report" element={<Report />} />
+          <Route path="/whatsapp" element={<WhatsApp />} />
           <Route path="/team" element={user.role === 'admin' ? <Team /> : <Navigate to="/" />} />
           <Route path="*" element={<p>Page not found.</p>} />
         </Routes>
